@@ -1,119 +1,189 @@
 import os
-import math
 import numpy as np
 import datetime as dt
-from numpy import newaxis
-from core.utils import Timer
-from keras.layers import Dense, Activation, Dropout, LSTM
-from keras.models import Sequential, load_model
-from keras.callbacks import EarlyStopping, ModelCheckpoint
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
 
-class Model():
+class Model(nn.Module):
 	"""A class for an building and inferencing an lstm model"""
 
 	def __init__(self):
-		self.model = Sequential()
+		super(Model, self).__init__()
+		self.layers = nn.ModuleList()
+		self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+		self.to(self.device)
+	def forward(self, x):
+        # # 定义前向传播过程
+		# for layer in self.layers:
+		# 	x, _ = layer(x)
+		# return x
+		
+		for layer in self.layers:
+			if isinstance(layer, nn.LSTM):
+				x, _ = layer(x)
+			elif isinstance(layer, nn.Sequential):
+				x = x[:, -1, :]  # 提取最后一个时间步
+			else:
+				x = layer(x)
+		return x
 
-	def load_model(self, filepath):
-		print('[Model] Loading model from file %s' % filepath)
-		self.model = load_model(filepath)
+
+	# def load_model(self, filepath):
+	# 	print('[Model] Loading model from file %s' % filepath)
+	# 	self.load_state_dict(torch.load(filepath, map_location=self.device))
+	# 	self.eval()
 
 	def build_model(self, configs):
-		timer = Timer()
-		timer.start()
-
+		
 		for layer in configs['model']['layers']:
-			neurons = layer['neurons'] if 'neurons' in layer else None
-			dropout_rate = layer['rate'] if 'rate' in layer else None
-			activation = layer['activation'] if 'activation' in layer else None
-			return_seq = layer['return_seq'] if 'return_seq' in layer else None
-			input_timesteps = layer['input_timesteps'] if 'input_timesteps' in layer else None
-			input_dim = layer['input_dim'] if 'input_dim' in layer else None
-
-			if layer['type'] == 'dense':
-				self.model.add(Dense(neurons, activation=activation))
+			# LSTM 层
 			if layer['type'] == 'lstm':
-				self.model.add(LSTM(neurons, input_shape=(input_timesteps, input_dim), return_sequences=return_seq))
-			if layer['type'] == 'dropout':
-				self.model.add(Dropout(dropout_rate))
-
-		self.model.compile(loss=configs['model']['loss'], optimizer=configs['model']['optimizer'])
-
+				neurons = layer.get('neurons')
+				input_dim = layer.get('input_dim')
+				input_timesteps = layer.get('input_timesteps')
+				return_seq = layer.get('return_seq')
+				if input_dim is None:
+					input_dim = neurons
+				lstm_layer = nn.LSTM(input_dim, neurons, batch_first=True)
+				
+				if not return_seq:
+					self.layers.append(nn.Sequential(nn.Flatten()))  # 展平输出
+				else:
+					self.layers.append(lstm_layer)
+			# Dropout 层
+			elif layer['type'] == 'dropout':
+				dropout_rate = layer.get('rate')
+				self.layers.append(nn.Dropout(dropout_rate))
+			# Dense (全连接) 层
+			elif layer['type'] == 'dense':
+				neurons = layer.get('neurons')
+				activation = layer.get('activation')
+				self.layers.append(nn.Linear(100, neurons))
+				if activation == 'relu':
+					self.layers.append(nn.ReLU())
+				elif activation == 'sigmoid':
+					self.layers.append(nn.Sigmoid())
+				elif activation == 'tanh':
+					self.layers.append(nn.Tanh())
+				elif activation == 'linear':
+					self.layers.append(nn.Identity())
+				
+		self.loss_fn = self.get_loss(configs['model']['loss'])
+		self.optimizer = self.get_optimizer(configs['model']['optimizer'])
+		self.save_dir = configs['model']['save_dir']
+		self.to(self.device)
 		print('[Model] Model Compiled')
-		timer.stop()
 
-	def train(self, x, y, epochs, batch_size, save_dir):
-		timer = Timer()
-		timer.start()
+	def get_loss(self, loss_name):
+		if loss_name == 'mse':
+			return nn.MSELoss()
+		elif loss_name == 'mae':
+			return nn.L1Loss()
+		elif loss_name == 'huber':
+			return nn.HuberLoss()
+	def get_optimizer(self, optimizer_name):
+        # 根据配置中的优化器名称返回相应的优化器
+		if optimizer_name == 'adam':
+			return optim.Adam(self.parameters())
+		elif optimizer_name == 'sgd':
+			return optim.SGD(self.parameters(), lr=0.01)  # 可以调整学习率
+		elif optimizer_name == 'rmsprop':
+			return optim.RMSprop(self.parameters())
+
+
+	def train_model(self, x, y, epochs, batch_size, save_dir):
+		
 		print('[Model] Training Started')
 		print('[Model] %s epochs, %s batch size' % (epochs, batch_size))
-		
+		self.train()
 		save_fname = os.path.join(save_dir, '%s-e%s.h5' % (dt.datetime.now().strftime('%d%m%Y-%H%M%S'), str(epochs)))
-		callbacks = [
-			EarlyStopping(monitor='val_loss', patience=2),
-			ModelCheckpoint(filepath=save_fname, monitor='val_loss', save_best_only=True)
-		]
-		self.model.fit(
-			x,
-			y,
-			epochs=epochs,
-			batch_size=batch_size,
-			callbacks=callbacks
-		)
-		self.model.save(save_fname)
-
-		print('[Model] Training Completed. Model saved as %s' % save_fname)
-		timer.stop()
-
-	def train_generator(self, data_gen, epochs, batch_size, steps_per_epoch, save_dir):
-		timer = Timer()
-		timer.start()
-		print('[Model] Training Started')
-		print('[Model] %s epochs, %s batch size, %s batches per epoch' % (epochs, batch_size, steps_per_epoch))
 		
-		save_fname = os.path.join(save_dir, '%s-e%s.h5' % (dt.datetime.now().strftime('%d%m%Y-%H%M%S'), str(epochs)))
-		callbacks = [
-			ModelCheckpoint(filepath=save_fname, monitor='loss', save_best_only=True)
-		]
-		self.model.fit_generator(
-			data_gen,
-			steps_per_epoch=steps_per_epoch,
-			epochs=epochs,
-			callbacks=callbacks,
-			workers=1
-		)
+		x_tensor = torch.tensor(x, dtype=torch.float32).to(self.device)
+		y_tensor = torch.tensor(y, dtype=torch.float32).to(self.device)
 		
+		dataset = TensorDataset(x_tensor, y_tensor)
+		dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+		for epoch in range(epochs):
+			epoch_loss = 0.0
+
+			for batch_x, batch_y in dataloader:
+				# 前向传播
+				self.optimizer.zero_grad()
+				
+				predictions = self(batch_x)
+
+				# 计算损失
+				loss = self.loss_fn(predictions, batch_y)
+
+				# 反向传播和参数更新
+				loss.backward()
+				self.optimizer.step()
+
+				epoch_loss += loss.item()
+
+			# avg_loss = epoch_loss / len(dataloader)
+			print(f'Epoch {epoch + 1}/{epochs}, Loss: {epoch_loss:.4f}')
+		
+		torch.save(self, save_fname)
 		print('[Model] Training Completed. Model saved as %s' % save_fname)
-		timer.stop()
+		
 
 	def predict_point_by_point(self, data):
-		#Predict each timestep given the last sequence of true data, in effect only predicting 1 step ahead each time
 		print('[Model] Predicting Point-by-Point...')
-		predicted = self.model.predict(data)
-		predicted = np.reshape(predicted, (predicted.size,))
-		return predicted
+		# input_tensor = torch.from_numpy(data).float().to(self.device)
+		# predicted = self(input_tensor)
+		# predicted = predicted.detach().cpu().numpy().reshape(-1)
+		# return predicted
+		self.eval()
+		with torch.no_grad():
+			x_tensor = torch.FloatTensor(data).to(self.device)
+			predictions = self(x_tensor)
+		return predictions.cpu().numpy()
 
 	def predict_sequences_multiple(self, data, window_size, prediction_len):
-		#Predict sequence of 50 steps before shifting prediction run forward by 50 steps
+		# Predict sequence of 50 steps before shifting prediction run forward by 50 steps
 		print('[Model] Predicting Sequences Multiple...')
+		self.eval()
 		prediction_seqs = []
-		for i in range(int(len(data)/prediction_len)):
-			curr_frame = data[i*prediction_len]
-			predicted = []
-			for j in range(prediction_len):
-				predicted.append(self.model.predict(curr_frame[newaxis,:,:])[0,0])
-				curr_frame = curr_frame[1:]
-				curr_frame = np.insert(curr_frame, [window_size-2], predicted[-1], axis=0)
-			prediction_seqs.append(predicted)
+		with torch.no_grad():
+			for i in range(int(len(data)/prediction_len)):
+				# curr_frame = data[i*prediction_len]
+				curr_frame = torch.FloatTensor(data[i * prediction_len]).to(self.device)
+				predicted = []
+				# for j in range(prediction_len):
+					# input_tensor = torch.from_numpy(curr_frame[np.newaxis, :, :]).float().to(self.device)
+					# output = self(input_tensor)
+					# predicted.append(output[0, 0].item())
+					# curr_frame = curr_frame[1:]
+					# curr_frame = np.insert(curr_frame, [window_size-2], predicted[-1], axis=0)
+				for _ in range(prediction_len):
+					pred = self(curr_frame.unsqueeze(0))[0].item()
+					predicted.append(pred)
+					curr_frame = torch.roll(curr_frame, -1, dims=0)
+					curr_frame[-1] = pred
+				prediction_seqs.append(predicted)
 		return prediction_seqs
 
 	def predict_sequence_full(self, data, window_size):
 		#Shift the window by 1 new prediction each time, re-run predictions on new window
 		print('[Model] Predicting Sequences Full...')
-		curr_frame = data[0]
+		self.eval()
 		predicted = []
-		for i in range(len(data)):
-			predicted.append(self.model.predict(curr_frame[newaxis,:,:])[0,0])
-			curr_frame = curr_frame[1:]
-			curr_frame = np.insert(curr_frame, [window_size-2], predicted[-1], axis=0)
+		with torch.no_grad():
+			curr_frame = torch.FloatTensor(data[0]).to(self.device)
+			for i in range(len(data)):
+				# input_tensor = torch.from_numpy(curr_frame[np.newaxis, :, :]).float().to(self.device)
+				# output = self(input_tensor)
+				# predicted.append(output[0, 0].item())
+				# curr_frame = curr_frame[1:]
+				# curr_frame = np.insert(curr_frame, [window_size-2], predicted[-1], axis=0)
+				pred = self(curr_frame.unsqueeze(0))[0].item()
+				predicted.append(pred)
+				
+				# 更新输入帧
+				curr_frame = torch.roll(curr_frame, -1, dims=0)
+				curr_frame[-1] = pred
 		return predicted

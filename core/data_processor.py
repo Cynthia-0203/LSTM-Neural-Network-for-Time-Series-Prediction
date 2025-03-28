@@ -14,6 +14,28 @@ class DataLoader():
         self.len_test   = len(self.data_test)
         self.len_train_windows = None
 
+    def get_train_data(self, seq_len, normalise):
+        '''
+        Create x, y train data windows
+        Warning: batch method, not generative, make sure you have enough memory to
+        load data, otherwise use generate_training_window() method.
+        '''
+        data_x = []
+        data_y = []
+        for i in range(self.len_train - seq_len):
+            x, y = self._next_window(i, seq_len, normalise)
+            data_x.append(x)
+            data_y.append(y)
+        return np.array(data_x), np.array(data_y)
+    
+    def _next_window(self, i, seq_len, normalise):
+        '''Generates the next data window from the given index location i'''
+        window = self.data_train[i:i+seq_len]
+        window = self.normalise_windows(window, single_window=True)[0] if normalise else window
+        x = window[:-1]
+        y = window[-1, [0]]
+        return x, y
+    
     def get_test_data(self, seq_len, normalise):
         '''
         Create x, y test data windows
@@ -30,21 +52,7 @@ class DataLoader():
         x = data_windows[:, :-1]
         y = data_windows[:, -1, [0]]
         return x,y
-
-    def get_train_data(self, seq_len, normalise):
-        '''
-        Create x, y train data windows
-        Warning: batch method, not generative, make sure you have enough memory to
-        load data, otherwise use generate_training_window() method.
-        '''
-        data_x = []
-        data_y = []
-        for i in range(self.len_train - seq_len):
-            x, y = self._next_window(i, seq_len, normalise)
-            data_x.append(x)
-            data_y.append(y)
-        return np.array(data_x), np.array(data_y)
-
+    
     def generate_train_batch(self, seq_len, batch_size, normalise):
         '''Yield a generator of training data from filename on given list of cols split for train/test'''
         i = 0
@@ -62,13 +70,7 @@ class DataLoader():
                 i += 1
             yield np.array(x_batch), np.array(y_batch)
 
-    def _next_window(self, i, seq_len, normalise):
-        '''Generates the next data window from the given index location i'''
-        window = self.data_train[i:i+seq_len]
-        window = self.normalise_windows(window, single_window=True)[0] if normalise else window
-        x = window[:-1]
-        y = window[-1, [0]]
-        return x, y
+    
 
     def normalise_windows(self, window_data, single_window=False):
         '''Normalise window with a base value of zero'''
